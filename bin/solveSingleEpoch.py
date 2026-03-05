@@ -2,6 +2,7 @@
 from optparse import OptionParser
 import os
 import sys
+import time as timeit
 
 #sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
@@ -44,6 +45,9 @@ if __name__ == '__main__':
 
 	odir = options.directory+"/"
 	mc = options.maxcore
+	st = timeit.time()
 	rf = drive_garpos(options.cfgfile, options.invcfg, odir, options.suf, mc)
+	et = timeit.time()
+	print(f'Total time in seconds: {et - st}')
 
 	exit()

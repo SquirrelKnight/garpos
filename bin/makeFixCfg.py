@@ -1,4 +1,11 @@
 #!/usr/bin/env python
+'''
+Modified:
+    2026-03-05 by Hutchinson
+        Added weighting to array configuration so that surveys with higher certainties
+        contribute more to the array dimensions.
+'''
+
 import os
 import sys
 import glob
@@ -139,11 +146,34 @@ if __name__ == '__main__':
 		
 		H[ndata][nmt:] = 1.
 		
-		HtH    = np.matmul(H.T, H)
-		HtHi   = np.linalg.inv(HtH)
-		HtHiHt = np.matmul(HtHi, H.T)
-		para = np.matmul(HtHiHt, data)
-		
+# 		HtH    = np.matmul(H.T, H)
+# 		HtHi   = np.linalg.inv(HtH)
+# 		HtHiHt = np.matmul(HtHi, H.T)
+# 		para = np.matmul(HtHiHt, data)
+
+		# --- Weighted least-squares computation for array configuration ---
+
+		# Extract errors and calculate weights as inverse variance (1/sigma^2)
+		# A small number is added to avoid division by zero if an error is 0.
+		errors = np.stack(pdata.err.values)
+		weights = 1.0 / (errors**2 + 1.e-12)
+
+		# Add a neutral weight for the constraint row (the last row of H and data)
+		weights = np.vstack([weights, [1., 1., 1.]])
+
+		# Solve the weighted least-squares problem for each component (E, N, U)
+		para = np.zeros((npara, 3))
+		for j in range(3): # Loop over the E, N, U components
+			# Create the diagonal weight matrix for the current component
+			W = np.diag(weights[:, j])
+
+			# Solve for parameters: para = inv(H' * W * H) * (H' * W * data)
+			HtW = np.matmul(H.T, W)
+			HtWH = np.matmul(HtW, H)
+			HtWH_inv = np.linalg.inv(HtWH)
+			HtWH_inv_HtW = np.matmul(HtWH_inv, HtW)
+			para[:, j] = np.matmul(HtWH_inv_HtW, data[:, j])
+				
 		calc = np.matmul(H, para)[:-1]
 		obsd = data[:-1]
 		depth = np.mean(obsd[:,2])
@@ -224,7 +254,7 @@ if __name__ == '__main__':
 		dCPos += "  %10.4f  %10.4f  %10.4f" % (3.,3.,3.)
 		
 		basename = os.path.basename(resf)
-		cfgf = os.path.join(cfgdir, basename.split("-")[0] + "-fix.ini")
+		cfgf = os.path.join(cfgdir, basename.split("-res")[0] + "-fix.ini")
 		
 		# modify ini file
 		f = open(resf,"r")

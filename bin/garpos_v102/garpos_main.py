@@ -5,6 +5,10 @@ Contains:
 	parallelrun
 	plot_hpres
 	drive_garpos
+Modified:
+    2026-03-05 by Hutchinson
+        Changed parallel processing behaviour to avoid overhead when using a single core 
+        (which will use multiple cores when calculating travel-times)
 """
 import os
 import glob
@@ -23,54 +27,45 @@ from .mp_estimation import MPestimate
 
 
 def parallelrun(inplist, maxcore):
-	"""
-	Run the model parameter estimation in parallel.
+    """
+    Run the model parameter estimation.
+    Bypasses multiprocessing overhead if maxcore <= 1.
+    """
+    from multiprocessing import Pool
+    
+    npara = len(inplist.index)
+    mc = min(maxcore, npara)
 
-	Parameters
-	----------
-	inplist : DataFrame
-		List of arguments for the function.
-	maxcore : int
-		maximum number of parallelization.
+    # Input files and Output parameters
+    i0, i1 = inplist.cfgfile, inplist.invcfg
+    o1, o2 = inplist.outdir, inplist.suffix
 
-	Returns
-	-------
-	inplist : DataFrame
-		List of arguments for the function in which brief results are added.
-	"""
+    # Hyperparameters
+    h0, h1 = inplist.lamb0.values, inplist.lgrad.values
+    h2, h3 = inplist.mu_t.values, inplist.mu_m.values
 
-	npara = len(inplist.index)
-	mc = min(maxcore, npara)
+    inp = list(zip(i0,i1,o1,o2,h0,h1,h2,h3))
 
-	# Input files
-	i0 = inplist.cfgfile
-	i1 = inplist.invcfg
+    # Sequential vs Parallel execution
+    if mc <= 1:
+        # Standard sequential loop (No IPC overhead!)
+        reslist = [MPestimate(*args) for args in inp]
+    else:
+        # Spin up the multiprocessing pool
+        with Pool(processes=mc) as p:
+            reslist = p.starmap(MPestimate, inp)
+            p.close()
+            p.join()
 
-	# Output parameters
-	o1 = inplist.outdir
-	o2 = inplist.suffix
+    # Append results
+    inplist["resfile"] = [ r[0] for r in reslist ]
+    inplist["RMS_dTT"] = [ r[1]/1000. for r in reslist ]
+    inplist["ABIC"] = [ r[2] for r in reslist ]
+    inplist["dE"] = [ r[3][0] for r in reslist ]
+    inplist["dN"] = [ r[3][1] for r in reslist ]
+    inplist["dU"] = [ r[3][2] for r in reslist ]
 
-	# Hyperparameters
-	h0 = inplist.lamb0.values
-	h1 = inplist.lgrad.values
-	h2 = inplist.mu_t.values
-	h3 = inplist.mu_m.values
-
-	inp = list(zip(i0,i1,o1,o2,h0,h1,h2,h3))
-
-	with Pool(processes=mc) as p:
-		reslist = p.starmap(MPestimate, inp)
-		p.close()
-
-	inplist["resfile"] = [ r[0] for r in reslist ]
-	inplist["RMS_dTT"] = [ r[1]/1000. for r in reslist ]
-	inplist["ABIC"] = [ r[2] for r in reslist ]
-	inplist["dE"] = [ r[3][0] for r in reslist ]
-	inplist["dN"] = [ r[3][1] for r in reslist ]
-	inplist["dU"] = [ r[3][2] for r in reslist ]
-
-	return inplist
-
+    return inplist
 
 def drive_garpos(cfgf, icfgf, outdir, suf, maxcore):
 	"""

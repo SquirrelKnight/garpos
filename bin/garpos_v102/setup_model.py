@@ -7,6 +7,8 @@ Modified:
 	07/01/2024 by S. Watanabe
 		to apply a mode for "array take-over"
 		(to solve each position and parallel disp. simultaneously)
+	2026-03-05 by Hutchinson
+	    Modified data_correlation to utilize a cKDTree for faster computing.
 Contains:
 	init_position
 	make_knots
@@ -16,6 +18,7 @@ Contains:
 import sys
 import numpy as np
 from scipy.sparse import csc_matrix, lil_matrix, linalg
+from scipy.spatial import cKDTree
 from sksparse.cholmod import cholesky
 
 
@@ -188,6 +191,7 @@ def derivative2(imp0, p, knots, lambdas):
 	H : ndarray
 		2nd derivative matrix of the B-spline basis.
 	"""
+
 	diff = lil_matrix( (imp0[5], imp0[5]) )
 
 	for k in range(len(lambdas)):
@@ -224,7 +228,7 @@ def derivative2(imp0, p, knots, lambdas):
 
 def data_correlation(shotdat, TT0, mu_t, mu_m):
 	"""
-	Calculate the covariance matrix for data.
+	Calculate the covariance matrix for data using a highly-optimized K-D Tree.
 
 	Parameters
 	----------
@@ -245,23 +249,47 @@ def data_correlation(shotdat, TT0, mu_t, mu_m):
 		The value of log(|Ei|).
 		|Ei| is the determinant of Ei.
 	"""
-
 	ndata = shotdat.index.size
 	sts = shotdat.ST.values
 	mtids = shotdat.mtid.values
-	negativedST = shotdat[ (shotdat.ST.diff(1) == 0.) & (shotdat.mtid.diff(1) ==0.) ]
-	if len(negativedST) > 0:
-		print(negativedST.index)
+	
+	# Vectorized check for duplicate timestamps in the same transponder
+	diff_st = np.diff(sts)
+	diff_mt = np.diff(mtids)
+	if np.any((diff_st == 0) & (diff_mt == 0)):
 		print("error in data_var_base; see setup_model.py")
 		sys.exit(1)
 
-	E = lil_matrix( (ndata, ndata) )
-	for i, (iMT, iST) in enumerate(zip( mtids, sts )):
-		idx = shotdat[ ( abs(sts - iST) < mu_t * 4.)].index
-		dshot = np.abs(iST - sts[idx])/mu_t
-		dcorr = np.exp(-dshot) * (mu_m + (1.-mu_m)*(iMT==mtids[idx]))
-		E[i,idx] = dcorr / TT0[i] / TT0[idx]
-	E = E.tocsc()
+	# 1. Build a C-speed K-D Tree for 1D time arrays
+	pts = sts.reshape(-1, 1)
+	tree = cKDTree(pts)
+
+	# 2. Find all pairs within the correlation window (returns a sparse COO matrix)
+	dist_matrix = tree.sparse_distance_matrix(tree, mu_t * 4.0, output_type='coo_matrix')
+
+	# Extract coordinates and distances
+	row = dist_matrix.row
+	col = dist_matrix.col
+	distances = dist_matrix.data
+
+	# 3. Vectorized correlation math
+	dshot = distances / mu_t
+	mt_match = mtids[row] == mtids[col]
+	dcorr = np.exp(-dshot) * (mu_m + (1.0 - mu_m) * mt_match)
+
+	# Scale by TT0
+	dcorr /= (TT0[row] * TT0[col])
+
+	# 4. Add the diagonal (self-pairs) manually since sparse_distance_matrix excludes them
+	diag_idx = np.arange(ndata)
+	diag_corr = 1.0 / (TT0**2)
+
+	final_row = np.concatenate([row, diag_idx])
+	final_col = np.concatenate([col, diag_idx])
+	final_data = np.concatenate([dcorr, diag_corr])
+
+	# 5. Build final CSC matrix in one fast pass
+	E = csc_matrix((final_data, (final_row, final_col)), shape=(ndata, ndata))
 
 	# cholesky decomposition
 	E_factor = cholesky(E, ordering_method="natural")
