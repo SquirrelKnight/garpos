@@ -54,38 +54,38 @@ def calc_atd_vectorized(pl, hd, rl, pc):
     return offsets[:, 1], offsets[:, 0], -offsets[:, 2]
     
 def calc_forward(shots, mp, nMT, icfg, svp, T0):
-	"""
-	Calculate the forward modeling of observation eqs.
+    """
+    Calculate the forward modeling of observation eqs.
 
-	Parameters
-	----------
-	shots : DataFrame
-		GNSS-A shot dataset.
-	mp : ndarray
-		complete model parameter vector.
-	nMT : int
-		number of transponders.
-	icfg : configparser
-		Config file for inversion conditions.
-	svp : DataFrame
-		Sound speed profile.
-	T0 : float
-		Typical travel time.
+    Parameters
+    ----------
+    shots : DataFrame
+        GNSS-A shot dataset.
+    mp : ndarray
+        complete model parameter vector.
+    nMT : int
+        number of transponders.
+    icfg : configparser
+        Config file for inversion conditions.
+    svp : DataFrame
+        Sound speed profile.
+    T0 : float
+        Typical travel time.
 
-	Returns
-	-------
-	shots : DataFrame
-		GNSS-A shot dataset in which calculated data is added.
-	"""
+    Returns
+    -------
+    shots : DataFrame
+        GNSS-A shot dataset in which calculated data is added.
+    """
 
     rsig = float(icfg.get("Inv-parameter","RejectCriteria"))
 
     # Vectorized ATD offset
     pl = np.array([mp[(nMT+1)*3+0], mp[(nMT+1)*3+1], mp[(nMT+1)*3+2]])
-    
+
     ple0, pln0, plu0 = calc_atd_vectorized(pl, shots.head0.values, shots.roll0.values, shots.pitch0.values)
     ple1, pln1, plu1 = calc_atd_vectorized(pl, shots.head1.values, shots.roll1.values, shots.pitch1.values)
-    
+
     shots['ple0'], shots['pln0'], shots['plu0'] = ple0, pln0, plu0
     shots['ple1'], shots['pln1'], shots['plu1'] = ple1, pln1, plu1
 
@@ -108,36 +108,36 @@ def calc_forward(shots, mp, nMT, icfg, svp, T0):
 
 
 def calc_gamma(mp, shotdat, imp0, spdeg, knots):
-	"""
-	Calculate correction value "gamma" in the observation eqs.
+    """
+    Calculate correction value "gamma" in the observation eqs.
 
-	Parameters
-	----------
-	mp : ndarray
-		complete model parameter vector.
-	shotdat : DataFrame
-		GNSS-A shot dataset.
-	imp0 : ndarray (len=5)
-		Indices where the type of model parameters change.
-	p : int
-		spline degree (=3).
-	knots : list of ndarray (len=5)
-		B-spline knots for each component in "gamma".
+    Parameters
+    ----------
+    mp : ndarray
+        complete model parameter vector.
+    shotdat : DataFrame
+        GNSS-A shot dataset.
+    imp0 : ndarray (len=5)
+        Indices where the type of model parameters change.
+    p : int
+        spline degree (=3).
+    knots : list of ndarray (len=5)
+        B-spline knots for each component in "gamma".
 
-	Returns
-	-------
-	gamma : ndarray
-		Values of "gamma". Note that scale facter is not applied.
-	a : 2-d list of ndarray
-		[a0[<alpha>], a1[<alpha>]] :: a[<alpha>] at transmit/received time.
-		<alpha> is corresponding to <0>, <1E>, <1N>, <2E>, <2N>.
-	"""
+    Returns
+    -------
+    gamma : ndarray
+        Values of "gamma". Note that scale facter is not applied.
+    a : 2-d list of ndarray
+        [a0[<alpha>], a1[<alpha>]] :: a[<alpha>] at transmit/received time.
+        <alpha> is corresponding to <0>, <1E>, <1N>, <2E>, <2N>.
+    """
 
     a0, a1 = [], []
-    
+
     st_vals = shotdat.ST.values
     rt_vals = shotdat.RT.values
-    
+
     for k, kn in enumerate(knots):
         if len(kn) == 0:
             a0.append(np.zeros(len(st_vals)))
@@ -173,77 +173,77 @@ def jacobian_gamma(shotdat, imp0, spdeg, knots):
     Replaces the massive for-loop over control points.
     """
     from scipy.interpolate import BSpline
-    
+
     ndata = len(shotdat)
     n_gamma_params = imp0[-1] - imp0[0]
-    
+
     # Pre-allocate the full Jacobian block for gamma
     jcb_gamma = np.zeros((n_gamma_params, ndata))
-    
+
     ls = 1000.0  # m/s/m to m/s/km order for gradient
-    
+
     de0, de1 = shotdat.de0.values, shotdat.de1.values
     dn0, dn1 = shotdat.dn0.values, shotdat.dn1.values
     mte, mtn = shotdat.mtde.values, shotdat.mtdn.values
-    
+
     # Multipliers for the 5 components: a0, a1E, a1N, a2E, a2N
     mult0 = [np.ones(ndata), de0 / ls, dn0 / ls, mte / ls, mtn / ls]
     mult1 = [np.ones(ndata), de1 / ls, dn1 / ls, mte / ls, mtn / ls]
-    
+
     st_vals = shotdat.ST.values
     rt_vals = shotdat.RT.values
-    
+
     current_row = 0
     for k, kn in enumerate(knots):
         if len(kn) == 0:
             continue
-        
+    
         n_params = imp0[k+1] - imp0[k]
-        
+    
         # Build strictly sparse design matrices (shape: ndata x n_params)
         B0 = BSpline.design_matrix(st_vals, kn, spdeg)
         B1 = BSpline.design_matrix(rt_vals, kn, spdeg)
-        
+    
         # Transpose to (n_params, ndata) and broadcast-multiply the spatial offsets row-by-row
         # In sparse math, .multiply() safely performs element-wise broadcasting!
         term0 = B0.T.multiply(mult0[k])
         term1 = B1.T.multiply(mult1[k])
-        
+    
         # Combine ST and RT terms (gamma = (gamma0 + gamma1) / 2)
         jcb_block = (term0 + term1) / 2.0
-        
+    
         # Dump the sparse block directly into the dense array
         jcb_gamma[current_row : current_row + n_params, :] = jcb_block.toarray()
         current_row += n_params
-        
+    
     return jcb_gamma
 
 def jacobian_pos(icfg, mp, slvidx0, shotdat, mtidx, svp, T0):
-	"""
-	Calculate Jacobian matrix for positions.
+    """
+    Calculate Jacobian matrix for positions.
 
-	Parameters
-	----------
-	icfg : configparser
-		Config file for inversion conditions.
-	mp : ndarray
-		complete model parameter vector.
-	slvidx0 : list
-		Indices of model parameters to be solved.
-	shotdat : DataFrame
-		GNSS-A shot dataset.
-	mtidx : dictionary
-		Indices of mp for each MT.
-	svp : DataFrame
-		Sound speed profile.
-	T0 : float
-		Typical travel time.
+    Parameters
+    ----------
+    icfg : configparser
+        Config file for inversion conditions.
+    mp : ndarray
+        complete model parameter vector.
+    slvidx0 : list
+        Indices of model parameters to be solved.
+    shotdat : DataFrame
+        GNSS-A shot dataset.
+    mtidx : dictionary
+        Indices of mp for each MT.
+    svp : DataFrame
+        Sound speed profile.
+    T0 : float
+        Typical travel time.
 
-	Returns
-	-------
-	jcbpos : lil_matrix
-		Jacobian matrix for positions.
-	"""
+    Returns
+    -------
+    jcbpos : lil_matrix
+        Jacobian matrix for positions.
+    """
 
     deltap = float(icfg.get("Inv-parameter","deltap"))
     ndata = shotdat.index.size
@@ -257,7 +257,7 @@ def jacobian_pos(icfg, mp, slvidx0, shotdat, mtidx, svp, T0):
 
     gamma = shotdat.gamma.values
     logTTc = shotdat.logTTc.values
-    
+
     # Pre-extract MT values for fast masking
     mt_vals = shotdat['MT'].values
 
@@ -293,7 +293,7 @@ def jacobian_pos(icfg, mp, slvidx0, shotdat, mtidx, svp, T0):
         idx = nMT*3 + 3 + j
         if not (idx in slvidx0):
             continue
-            
+        
         mpj = mp.copy()
         mpj[(nMT+1)*3 + j] += deltap
         pl = np.array([mpj[(nMT+1)*3 + 0], mpj[(nMT+1)*3 + 1], mpj[(nMT+1)*3 + 2]])
@@ -301,7 +301,7 @@ def jacobian_pos(icfg, mp, slvidx0, shotdat, mtidx, svp, T0):
         # Vectorized ATD offset applied IN PLACE
         ple0, pln0, plu0 = calc_atd_vectorized(pl, shotdat.head0.values, shotdat.roll0.values, shotdat.pitch0.values)
         ple1, pln1, plu1 = calc_atd_vectorized(pl, shotdat.head1.values, shotdat.roll1.values, shotdat.pitch1.values)
-        
+    
         shotdat['ple0'], shotdat['pln0'], shotdat['plu0'] = ple0, pln0, plu0
         shotdat['ple1'], shotdat['pln1'], shotdat['plu1'] = ple1, pln1, plu1
 

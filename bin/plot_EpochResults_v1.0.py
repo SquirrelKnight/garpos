@@ -14,9 +14,6 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import pandas as pd
 
-from pandas.plotting import register_matplotlib_converters
-register_matplotlib_converters()
-
 
 def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 	
@@ -30,7 +27,8 @@ def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 	mtcmap  = plt.get_cmap("tab10")
 	
 	alldat = pd.read_csv(obsfile, comment='#', index_col=0)
-	alldat['dt'] = [ d0 + timedelta(seconds=t) for t in alldat['ST'] ]
+# 	alldat['dt'] = [ d0 + timedelta(seconds=t) for t in alldat['ST'] ]
+	alldat['dt'] = pd.to_datetime(alldat['ST'], unit='s')
 	
 	setlist = sorted(set(alldat['SET']))
 	
@@ -91,8 +89,10 @@ def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 		print(setgroup)
 		shots = alldat[ alldat['SET'].isin(setgroup) ]
 		
-		x0 = d0 + timedelta(seconds=shots.ST.values[0])  - timedelta(seconds=offsec)
-		x1 = d0 + timedelta(seconds=shots.ST.values[-1]) + timedelta(seconds=offsec)
+# 		x0 = d0 + timedelta(seconds=shots.ST.values[0])  - timedelta(seconds=offsec)
+		x0 = shots.dt.values[0] - pd.Timedelta(offsec, unit='s')
+# 		x1 = d0 + timedelta(seconds=shots.ST.values[-1]) + timedelta(seconds=offsec)
+		x1 = shots.dt.values[-1] + pd.Timedelta(offsec, unit='s')
 		mp = np.loadtxt(mpfile, delimiter=',')
 		
 		if nsetg == 1:
@@ -102,10 +102,10 @@ def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 		
 		fig = plt.figure(figsize=(14,18))
 		plt.rcParams["font.size"] = 18
-		ax0 = fig.add_subplot(4, 1, 1)
-		ax1 = fig.add_subplot(4, 1, 2, sharex=ax0)
-		ax2 = fig.add_subplot(4, 1, 3, sharex=ax0)
-		ax3 = fig.add_subplot(4, 1, 4)
+		ax0 = fig.add_subplot(4, 1, 1) 
+		ax1 = fig.add_subplot(4, 1, 2, sharex=ax0) 
+		ax2 = fig.add_subplot(4, 1, 3, sharex=ax0) 
+		ax3 = fig.add_subplot(4, 1, 4) 
 		ax0.set_position([0.125, 0.7, 0.75, 0.2])
 		ax1.set_position([0.125, 0.6, 0.75, 0.1])
 		ax2.set_position([0.125, 0.4, 0.75, 0.2])
@@ -133,7 +133,10 @@ def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 		ax1.set_ylabel("Rejected\nshots\n",fontsize=20)
 		ax1.tick_params(labelbottom=False)
 		
-		if (x1-x0) > timedelta(hours=17.):
+		if (x1-x0) > timedelta(hours=48.):
+			inthour = 24
+			subhour = 12
+		elif (x1-x0) > timedelta(hours=17.):
 			inthour = 8
 			subhour = 4
 		elif (x1-x0) > timedelta(hours=9.):
@@ -162,15 +165,20 @@ def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 		sets = shots['SET'].unique()
 		
 		vecindex = []
+		validsets = []
 		for s, st in enumerate(sets):
 			tm = shot_tmp[(shot_tmp['SET']==st)].reset_index(drop=True).copy()
-			tw0 = tm['ST'].values[0]
-			tw1 = tm['RT'].values[-1]
-			s0index = shot_tmp[(shot_tmp['SET']==st)].index.values[0]
-			s1index = shot_tmp[(shot_tmp['SET']==st)].index.values[-1]
-			vecindex.append([st, np.linspace(s0index, s1index, ngrad)])
-			ax0.plot(tm['dt'], tm['a'], color=setcmap(s), linewidth=4, zorder=1)
-			ax3.plot(tm['dt'], tm['zeros'], color=setcmap(s), linewidth=4, zorder=1,label=st)
+			if len(tm) > 0: # Added to prevent crashing if one set is entirely dropped
+				tw0 = tm['ST'].values[0]
+				tw1 = tm['RT'].values[-1]
+				s0index = shot_tmp[(shot_tmp['SET']==st)].index.values[0]
+				s1index = shot_tmp[(shot_tmp['SET']==st)].index.values[-1]
+				vecindex.append([st, np.linspace(s0index, s1index, ngrad)])
+				validsets.append(st)
+				ax0.plot(tm['dt'], tm['a'], color=setcmap(s), linewidth=4, zorder=1)
+				ax3.plot(tm['dt'], tm['zeros'], color=setcmap(s), linewidth=4, zorder=1,label=st)
+		
+		sets = validsets
 		
 		ax0.xaxis.set_major_locator(mdates.HourLocator(interval=inthour, tz=None))
 		ax0.xaxis.set_minor_locator(mdates.HourLocator(interval=subhour, tz=None))
@@ -295,7 +303,7 @@ def plot_residuals(resf, obsfile, mpfile, d0, MTs, V0, ext):
 		ax0.grid(which = "major", axis = "y", linestyle = "--", linewidth = 1)
 		ax2.grid(which = "major", axis = "y", linestyle = "--", linewidth = 1)
 		ax3.grid(which = "major", axis = "y", linestyle = "--", linewidth = 1)
-		plt.savefig(obsimg)
+		plt.savefig(obsimg,bbox_inches='tight')
 		plt.close()
 	
 	return

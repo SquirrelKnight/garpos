@@ -3,7 +3,6 @@ Created:
 	07/01/2020 by S. Watanabe
 Contains:
 	parallelrun
-	plot_hpres
 	drive_garpos
 Modified:
     2026-03-05 by Hutchinson
@@ -21,6 +20,7 @@ import numpy as np
 import pandas as pd
 from pandas.plotting import scatter_matrix
 import matplotlib.pyplot as plt
+from numba import set_num_threads
 
 # garpos module
 from .mp_estimation import MPestimate
@@ -47,11 +47,13 @@ def parallelrun(inplist, maxcore):
     inp = list(zip(i0,i1,o1,o2,h0,h1,h2,h3))
 
     # Sequential vs Parallel execution
-    if mc <= 1:
-        # Standard sequential loop (No IPC overhead!)
+    if mc == 1:
+        # Standard sequential loop
+        set_num_threads(os.cpu_count() or 1)
         reslist = [MPestimate(*args) for args in inp]
     else:
         # Spin up the multiprocessing pool
+        set_num_threads(1)
         with Pool(processes=mc) as p:
             reslist = p.starmap(MPestimate, inp)
             p.close()

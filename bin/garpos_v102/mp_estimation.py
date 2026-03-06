@@ -15,9 +15,10 @@ Modified:
 		"invtyp" is deleted. users can set zero in config files 
 		to solve limited parameter(s).
     2026-03-05 by Hutchinson
-        Made optimizations to speed up inversions and save RAM.
-        Added a tolerance factor to the priori covariance matrix to prevent crashing with
+        - Made optimizations to speed up inversions and save RAM.
+        - Added a tolerance factor to the priori covariance matrix to prevent crashing with
         smaller knotints and smaller SETs.
+        - Added total propagation uncertainty for GNSS position errors.
 '''
 
 import os
@@ -34,7 +35,48 @@ from .setup_model import init_position, make_knots, derivative2, data_correlatio
 from .forward import calc_forward, calc_gamma, jacobian_pos, jacobian_gamma
 from .output import outresults
 
-
+def get_dynamic_variance(shotdat, base_scale_sec, T0, V0):
+    """
+    Projects 6-column GNSS uncertainty into an array of dimensionless 
+    travel-time variances. Falls back to static variance if columns are missing.
+    """
+    # Define the required columns for Total Propagated Uncertainty
+    required_cols = ['sde0', 'sdn0', 'sdu0', 'sde1', 'sdn1', 'sdu1']
+    
+    # Check if all required columns are present in the dataset
+    if all(col in shotdat.columns for col in required_cols):
+        # Calculate the true geometric vectors from Antenna to Transponder
+        dx0 = shotdat.sta0_e - shotdat.ant_e0
+        dy0 = shotdat.sta0_n - shotdat.ant_n0
+        dz0 = shotdat.sta0_u - shotdat.ant_u0
+        L0 = np.sqrt(dx0**2 + dy0**2 + dz0**2)
+        
+        dx1 = shotdat.sta0_e - shotdat.ant_e1
+        dy1 = shotdat.sta0_n - shotdat.ant_n1
+        dz1 = shotdat.sta0_u - shotdat.ant_u1
+        L1 = np.sqrt(dx1**2 + dy1**2 + dz1**2)
+        
+        # Calculate unit vectors (u0 and u1)
+        u0_e, u0_n, u0_u = dx0/L0, dy0/L0, dz0/L0
+        u1_e, u1_n, u1_u = dx1/L1, dy1/L1, dz1/L1
+        
+        # 3. Project GNSS errors onto the true slant range (Variance = sigma^2)
+        var_slant0 = (u0_e * shotdat.sde0)**2 + (u0_n * shotdat.sdn0)**2 + (u0_u * shotdat.sdu0)**2
+        var_slant1 = (u1_e * shotdat.sde1)**2 + (u1_n * shotdat.sdn1)**2 + (u1_u * shotdat.sdu1)**2
+        
+        # Convert spatial variance to temporal variance using true average velocity
+        var_dynamic_tt = (var_slant0 + var_slant1) / (V0**2)
+        
+        # Total variance in seconds squared
+        total_var_sec = (base_scale_sec**2) + var_dynamic_tt
+        
+    else:
+        # FALLBACK: Create a uniform array using ONLY the static baseline scale
+        total_var_sec = np.ones(len(shotdat)) * (base_scale_sec**2)
+        
+    # Return dimensionless variance array scaled by T0
+    return total_var_sec / (T0**2)
+            
 def MPestimate(cfgf, icfgf, odir, suf, lamb0, lgrad, mu_t, mu_m):
     spdeg = 3
     np.set_printoptions(threshold=np.inf)
@@ -53,6 +95,7 @@ def MPestimate(cfgf, icfgf, odir, suf, lamb0, lgrad, mu_t, mu_m):
     knotint2 = float(icfg.get("Inv-parameter","knotint2"))*60.
     rsig = float(icfg.get("Inv-parameter","RejectCriteria"))
     scale = float(icfg.get("Inv-parameter","traveltimescale"))
+    base_scale_sec = scale
     maxloop = int(icfg.get("Inv-parameter","maxloop"))
     ConvCriteria = float(icfg.get("Inv-parameter","ConvCriteria"))
 
@@ -194,13 +237,15 @@ def MPestimate(cfgf, icfgf, odir, suf, lamb0, lgrad, mu_t, mu_m):
     TT0 = tmp.TT.values / T0
 
     if icorrE:
-        E_factor = data_correlation(tmp, TT0, mu_t, mu_m)
+        dyn_var_array = get_dynamic_variance(tmp, base_scale_sec, T0, V0)
+        E_factor = data_correlation(tmp, TT0, mu_t, mu_m, dyn_var_array)
         logdetEi = -E_factor.logdet()
     else:
         # OPTIMIZATION: Avoid Dense 20GB matrix crash
-        Ei = diags(TT0**2., format='csc') / scale**2.
-        logdetEi = (np.log(TT0**2.)).sum()
-
+        dyn_var_array = get_dynamic_variance(tmp, base_scale_sec, T0, V0)
+        Ei = diags(TT0**2. / dyn_var_array, format='csc')
+        logdetEi = np.sum(np.log(TT0**2. / dyn_var_array))
+        
     #############################
     ### loop for Least Square ###
     #############################
@@ -235,8 +280,8 @@ def MPestimate(cfgf, icfgf, odir, suf, lamb0, lgrad, mu_t, mu_m):
         alpha = 1.0
         if icorrE:
             LiAk = E_factor.solve_L(jcb.T.tocsc(), use_LDLt_decomposition=False)
-            AktEiAk = LiAk.T @ LiAk / scale**2.
-            rk = jcb @ E_factor(tmp.ResiTT.values) / scale**2. + Di @ (mp0-mp1)
+            AktEiAk = LiAk.T @ LiAk
+            rk = jcb @ E_factor(tmp.ResiTT.values) + Di @ (mp0-mp1)
         else:
             AktEi = jcb @ Ei
             AktEiAk = AktEi @ jcb.T
@@ -294,16 +339,18 @@ def MPestimate(cfgf, icfgf, odir, suf, lamb0, lgrad, mu_t, mu_m):
 
         if rsig > 0.1:
             if icorrE:
-                E_factor = data_correlation(tmp, TT0, mu_t, mu_m)
+                dyn_var_array = get_dynamic_variance(tmp, base_scale_sec, T0, V0)
+                E_factor = data_correlation(tmp, TT0, mu_t, mu_m, dyn_var_array)
                 logdetEi = -E_factor.logdet()
             else:
-                Ei = diags(TT0**2., format='csc') / scale**2.
-                logdetEi = (np.log(TT0**2.)).sum()
-
+                dyn_var_array = get_dynamic_variance(tmp, base_scale_sec, T0, V0)
+                Ei = diags(TT0**2. / dyn_var_array, format='csc')
+                logdetEi = np.sum(np.log(TT0**2. / dyn_var_array))
+                
         rttadp = tmp.ResiTT.values
 
         if icorrE:
-            misfit = rttadp @ E_factor(rttadp) / scale**2.
+            misfit = rttadp @ E_factor(rttadp)
         else:
             rttvec = csr_matrix(np.array([rttadp]))
             misfit = ((rttvec @ Ei) @ rttvec.T)[0,0]

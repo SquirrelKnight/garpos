@@ -8,7 +8,8 @@ Modified:
 		to apply a mode for "array take-over"
 		(to solve each position and parallel disp. simultaneously)
 	2026-03-05 by Hutchinson
-	    Modified data_correlation to utilize a cKDTree for faster computing.
+	    - Modified data_correlation to utilize a cKDTree for faster computing.
+	    - The data correlation includes support for total propagation uncertainty.
 Contains:
 	init_position
 	make_knots
@@ -226,72 +227,75 @@ def derivative2(imp0, p, knots, lambdas):
 	return H
 
 
-def data_correlation(shotdat, TT0, mu_t, mu_m):
-	"""
-	Calculate the covariance matrix for data using a highly-optimized K-D Tree.
+def data_correlation(shotdat, TT0, mu_t, mu_m, dyn_var_array):
+    """
+    Calculate the covariance matrix for data using a highly-optimized K-D Tree.
 
-	Parameters
-	----------
-	shotdat : DataFrame
-		GNSS-A shot dataset.
-	TT0 : ndarray (len=ndata)
-		Vector of (travel time) / (characteristic travel time).
-	mu_t : float
-		Correlation length (in sec.).
-	mu_m : float
-		Ratio of correlation between the different transponders.
+    Parameters
+    ----------
+    shotdat : DataFrame
+        GNSS-A shot dataset.
+    TT0 : ndarray (len=ndata)
+        Vector of (travel time) / (characteristic travel time).
+    mu_t : float
+        Correlation length (in sec.).
+    mu_m : float
+        Ratio of correlation between the different transponders.
 
-	Returns
-	-------
-	Ei : ndarray
-		Inverse covariance matrix for data.
-	logdetEi : float
-		The value of log(|Ei|).
-		|Ei| is the determinant of Ei.
-	"""
-	ndata = shotdat.index.size
-	sts = shotdat.ST.values
-	mtids = shotdat.mtid.values
-	
-	# Vectorized check for duplicate timestamps in the same transponder
-	diff_st = np.diff(sts)
-	diff_mt = np.diff(mtids)
-	if np.any((diff_st == 0) & (diff_mt == 0)):
-		print("error in data_var_base; see setup_model.py")
-		sys.exit(1)
+    Returns
+    -------
+    Ei : ndarray
+        Inverse covariance matrix for data.
+    logdetEi : float
+        The value of log(|Ei|).
+        |Ei| is the determinant of Ei.
+    """
+    ndata = shotdat.index.size
+    sts = shotdat.ST.values
+    mtids = shotdat.mtid.values
 
-	# 1. Build a C-speed K-D Tree for 1D time arrays
-	pts = sts.reshape(-1, 1)
-	tree = cKDTree(pts)
+    # Vectorized check for duplicate timestamps in the same transponder
+    diff_st = np.diff(sts)
+    diff_mt = np.diff(mtids)
+    if np.any((diff_st == 0) & (diff_mt == 0)):
+        print("error in data_var_base; see setup_model.py")
+        sys.exit(1)
 
-	# 2. Find all pairs within the correlation window (returns a sparse COO matrix)
-	dist_matrix = tree.sparse_distance_matrix(tree, mu_t * 4.0, output_type='coo_matrix')
+    # 1. Build a C-speed K-D Tree for 1D time arrays
+    pts = sts.reshape(-1, 1)
+    tree = cKDTree(pts)
 
-	# Extract coordinates and distances
-	row = dist_matrix.row
-	col = dist_matrix.col
-	distances = dist_matrix.data
+    # 2. Find all pairs within the correlation window (returns a sparse COO matrix)
+    dist_matrix = tree.sparse_distance_matrix(tree, mu_t * 4.0, output_type='coo_matrix')
 
-	# 3. Vectorized correlation math
-	dshot = distances / mu_t
-	mt_match = mtids[row] == mtids[col]
-	dcorr = np.exp(-dshot) * (mu_m + (1.0 - mu_m) * mt_match)
+    # Extract coordinates and distances
+    row = dist_matrix.row
+    col = dist_matrix.col
+    distances = dist_matrix.data
 
-	# Scale by TT0
-	dcorr /= (TT0[row] * TT0[col])
+    # 3. Vectorized correlation math
+    dshot = distances / mu_t
+    mt_match = mtids[row] == mtids[col]
+    dcorr = np.exp(-dshot) * (mu_m + (1.0 - mu_m) * mt_match)
 
-	# 4. Add the diagonal (self-pairs) manually since sparse_distance_matrix excludes them
-	diag_idx = np.arange(ndata)
-	diag_corr = 1.0 / (TT0**2)
+    # Scale by TT0
+    ping_scale = np.sqrt(dyn_var_array.to_numpy()) / TT0
+    
+    dcorr *= ping_scale[row]
+    dcorr *= ping_scale[col]
+    
+    # 4. Add the diagonal (self-pairs) manually since sparse_distance_matrix excludes them
+    diag_idx = np.arange(ndata)
+    diag_corr = dyn_var_array.to_numpy() / (TT0**2)
 
-	final_row = np.concatenate([row, diag_idx])
-	final_col = np.concatenate([col, diag_idx])
-	final_data = np.concatenate([dcorr, diag_corr])
+    final_row = np.concatenate([row, diag_idx])
+    final_col = np.concatenate([col, diag_idx])
+    final_data = np.concatenate([dcorr, diag_corr])
 
-	# 5. Build final CSC matrix in one fast pass
-	E = csc_matrix((final_data, (final_row, final_col)), shape=(ndata, ndata))
+    # 5. Build final CSC matrix in one fast pass
+    E = csc_matrix((final_data, (final_row, final_col)), shape=(ndata, ndata))
 
-	# cholesky decomposition
-	E_factor = cholesky(E, ordering_method="natural")
+    # cholesky decomposition
+    E_factor = cholesky(E, ordering_method="natural")
 
-	return E_factor
+    return E_factor
